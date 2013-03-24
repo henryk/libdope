@@ -13,7 +13,7 @@
  ============================================================================
  */
 
-#include "libdope.h"
+#include "dope.h"
 
 int main(void) {
   print_hello();

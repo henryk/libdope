@@ -19,7 +19,8 @@ noinst_PROGRAMS=example
 example_SOURCES= example.c
 
 # Linker options for a.out
-example_LDFLAGS = $(top_srcdir)/libdope/libdope.la
+AM_LDFLAGS = $(top_srcdir)/libdope/libdope.la
+LDADD = $(DEPS_LIBS)
 
 # Compiler options for a.out
-example_CPPFLAGS = -I$(top_srcdir)/include
+example_CPPFLAGS = -I$(top_srcdir)/include $(DEPS_CFLAGS)

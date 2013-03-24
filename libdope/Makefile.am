@@ -15,5 +15,5 @@ libdope_la_LDFLAGS =
 
 # Compiler options. Here we are adding the include directory
 # to be searched for headers included in the source code.
-libdope_la_CPPFLAGS = -I$(top_srcdir)/include
-
+libdope_la_CPPFLAGS = -Wall -pedantic -Werror -I$(top_srcdir)/include $(DEPS_CFLAGS) $(LIBGCRYPT_CFLAGS)
+libdope_la_LIBADD = $(DEPS_LIBS) $(LIBGCRYPT_LIBS)

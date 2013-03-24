@@ -1,0 +1,115 @@
+DESfire EV1 application design for DOPE: DESfire Open Payment Environment
+
+AID FF77CF
+Authentication AES, 5 keys (Master, Identification, Debit, Limited Credit, Credit), all files are fully enciphered, keys may be changed after authentication with master key
+
+File 0: Identification.  Backup Data File 40 bytes, Read Identification, Write Master, Readwrite Master, Change accessrights: Never
+Byte 0: Application version.subversion (1 nibble each), starts at 0.0
+	FIXME: Define version semantics with regards to parsing, processing and writing
+Byte 1: Instance identifier length, currently 36 byte
+Byte 2-37: Instance identifier, string, UUID in dashed standard format, lowercase
+Byte 38-39: Application flags, 16-bit unsigned integer, LSByte first
+	0: Limited credit enabled (0= no, 1= yes)
+	1-4: Key derivation
+		1: Use instance identifier (0= no, 1= yes)
+		2: Use card UID (0=no, 1= yes)
+		3-4: Reserved, abort processing if set and unable to handle
+	5-8: Signature generation
+		0000: Use format 0
+		Other values reserved, abort processing if set and unable to handle
+	Remainder of field reserved, _ignore_ if set and unable to handle. Incompatible additions will be announced through application version field
+
+File 1: Transaction counter.  Value file, initial value 0xFFFFFFFF, lower limit 0, upper limit 0xFFFFFFFF, Read: Debit, Write: Never, Readwrite: Never, Change accessrights: Never
+	Unsigned integer, must be decremented for any change in Identification or Cash value files
+
+File 2: Cash value.  Value file, initial value 0, lower limit 0, upper limit configurable, Read: Debit, Write: Limited Credit, Readwrite: Credit, Change accessrights: Never
+	Unsigned integer, represents monetary value in 100000th of a full unit.
+
+File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Credit, Change accessrights: Never
+	Must be updated for any change in Transaction counter
+	2 Bytes: 16-bit unsigned integer, LSByte first, length of old signature 
+	x Bytes old signature
+	4 Bytes: 32-bit unsigned integer, LSByte first, key identifier. Upper three bits:
+		29: Allow debit (0= no, 1= yes)
+		30: Allow limited credit (0= no, 1=yes)
+		31: Allow credit (0= no, 1=yes)
+	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
+	x Bytes signature
+	
+		Signature format 0: signature over
+			Byte 0: signature format version, fixed byte 0
+			Bytes 1-8: length fields, all unsigned integers, LSByte first
+				1: 8 bit, instance identifier, if enabled
+				2: 8 bit, card UID, if enabled
+				3: 8 bit, identification file (entire contents)
+				4-5: 16 bit, old signature
+				6: 8 bit, key identifier
+			Remainder of file (all unsigned integers: LSByte first):
+				4 Byte old value
+				4 Byte new transaction counter 
+				4 Byte lower limit
+				4 Byte upper limit
+				4 Byte value
+				instance identifier of given length
+				card UID of given length
+				identification file of given length
+				old signature of given length
+				key identifier of given length
+
+Key derivation type 0
+	HMAC-SHA256, truncated to 128 bits for AES-128
+	Derivation data:
+		0: 8 bit derivation type, fixed byte 0
+		1-4: length fields
+			1: instance identifier
+			2: card UID
+			3-4: reserved, length 0 if not used (indicated in Application flags in Identification file)
+		3 byte AID (LSByte first)
+		1 byte key number
+		instance identifier of given length
+		card UID of given length
+		reserved fields of given length
+
+
+Read process:
+	Authenticate with Identification key
+	Read Identification file
+	Perform key derivation for Debit key
+	Authenticate with derived Debit key
+	Read Transaction counter, Cash value, Signature
+	Verify Signature
+
+Debit process:
+	... after read process ...
+	Debit 1 from transaction counter
+	Debit x from cash value
+	Calculate new signature
+	Write new signature
+	Commit transaction
+	In error case: Re-read application and compare transaction counter
+
+Credit process:
+	... after read process ...
+	Debit 1 from transaction counter
+	Perform key derivation for Credit key
+	Authenticate with derived Credit key   XXX FIXME Does this abort the transaction?
+	Credit x to cash value
+	Calculate new signature
+	Write new signature
+	Commit transaction
+	In error case: Re-read application and compare transaction counter and cash value
+
+Limited credit process:
+	... after read process ...
+	Debit 1 from transaction counter
+	Perform key derivation for Limited credit key
+	Authenticate with derived Limited credit key  XXX FIXME Does this abort the transaction?
+	Limited credit x to cash value
+	Calculate new signature
+	Authenticate with derived Debit key
+	Calculate new signature
+	Write new signature
+	Commit transaction
+	In error case: Re-read application and compare transaction counter and cash value
+	
+FIXME: The (limited) credit processes seem funky, may need adjustment. 

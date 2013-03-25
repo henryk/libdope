@@ -19,20 +19,35 @@ Byte 38-39: Application flags, 16-bit unsigned integer, LSByte first
 		Other values reserved, abort processing if set and unable to handle
 	Remainder of field reserved, _ignore_ if set and unable to handle. Incompatible additions will be announced through application version field
 
-File 1: Transaction counter.  Value file, initial value 0xFFFFFFFF, lower limit 0, upper limit 0xFFFFFFFF, Read: Debit, Write: Never, Readwrite: Never, Change accessrights: Never
-	Unsigned integer, must be decremented for any change in Identification or Cash value files
+File 1: Transaction counter.  Value file, initial value 0x7FFFFFFF, lower limit 0, upper limit 0x7FFFFFFF, Read: Debit, Write: Never, Readwrite: Never, Change accessrights: Never
+	Signed integer, must be decremented for any change in Identification or Cash value files
 
 File 2: Cash value.  Value file, initial value 0, lower limit 0, upper limit configurable, Read: Debit, Write: Limited Credit, Readwrite: Credit, Change accessrights: Never
-	Unsigned integer, represents monetary value in 100000th of a full unit.
+	Signed integer, represents monetary value in 100000th of a full unit.
 
 File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Credit, Change accessrights: Never
 	Must be updated for any change in Transaction counter
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of old signature 
 	x Bytes old signature
-	4 Bytes: 32-bit unsigned integer, LSByte first, key identifier. Upper three bits:
-		29: Allow debit (0= no, 1= yes)
-		30: Allow limited credit (0= no, 1=yes)
-		31: Allow credit (0= no, 1=yes)
+	4 Bytes: 32-bit signed integer, LSByte first, old value
+	2 Bytes: 16-bit unsigned integer, LSByte first, length of certificate
+		1 byte certificate type, fixed byte 0
+		4 Bytes: 32-bit unsigned integer, LSByte first, key identifier. 
+			Upper three bits:
+				29: Allow debit (0= no, 1= yes)
+				30: Allow limited credit (0= no, 1=yes)
+				31: Allow credit (0= no, 1=yes)
+			all bits 0: reserved invalid
+			all bits 1: reserved master
+		2 Bytes: 16-bit unsigned integer, LSByte first, length of public key
+		x Bytes public key
+		2 Bytes: 16-bit unsigned integer, LSByte first, length of certification signature
+		x Bytes certification signature
+			certificate type 0: signature over
+				Byte 0: certificate type
+				Byte 1-4: key identifier, 32-bit unsigned integer, LSByte first
+				Byte 5-6: 16-bit unsigned integer, LSByte first, length of public key
+				Byte 7-x: public key
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
 	x Bytes signature
 	
@@ -44,12 +59,12 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 				3: 8 bit, identification file (entire contents)
 				4-5: 16 bit, old signature
 				6: 8 bit, key identifier
-			Remainder of file (all unsigned integers: LSByte first):
+			Remainder of file (all signed integers: LSByte first):
 				4 Byte old value
 				4 Byte new transaction counter 
-				4 Byte lower limit
-				4 Byte upper limit
-				4 Byte value
+				4 Byte new lower limit
+				4 Byte new upper limit
+				4 Byte new value
 				instance identifier of given length
 				card UID of given length
 				identification file of given length

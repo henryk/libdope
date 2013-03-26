@@ -34,11 +34,12 @@ File 2: Cash value.  Value file, initial value 0, lower limit 0, upper limit con
 
 File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Credit, Change accessrights: Never
 	Must be updated for any change in Transaction counter
-	2 Bytes: 16-bit unsigned integer, LSByte first, length of old signature 
-	x Bytes old signature
+	2 Bytes: 16-bit unsigned integer, LSByte first, length of old hash 
+	x Bytes old hash
+		This is the hash the previous signature was made over
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of certificate
 	x Bytes: certificate
-		1 Byte certificate type, currently 0, abort if unable to handle
+		1 Byte certificate format, currently 0, abort if unable to handle
 		4 Bytes: 32-bit unsigned integer, LSByte first, key identifier. 
 			all bits 0: invalid
 			all bits 1: reserved
@@ -49,32 +50,36 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 			Other values reserved, _ignore_ if set and unable to handle, incompatible additions will be announced through certificate type
 		2 Bytes: 16-bit unsigned integer, LSByte first, length of public key
 		x Bytes public key
-			1 Byte type and format, currently only 0
-			Format 0: uses ECDSA, curve NIST P-256
+			1 Byte type, currently only 0
+			Type 0: uses ECDSA, curve NIST P-256
 				q: unsigned integer, MSByte first
 		2 Bytes: 16-bit unsigned integer, LSByte first, length of certification signature
 		x Bytes certification signature
-			certificate type 0: uses SHA-256 with ECDSA, curve NIST P-256
+			certificate format 0
 				signature over
-					Byte 0: certificate type
-					Byte 1-4: key identifier, 32-bit unsigned integer, LSByte first
-					Byte 5: key flags
-					Byte 6-7: 16-bit unsigned integer, LSByte first, length of public key
-					Byte 8-x: public key
+					Byte 0: signature type
+					Byte 1: certificate type
+					Byte 2-5: key identifier, 32-bit unsigned integer, LSByte first
+					Byte 6: key flags
+					Byte 7-8: 16-bit unsigned integer, LSByte first, length of public key
+					Byte 9-x: public key
 				signature expressed as
+					signature type: 1 byte
+						0 for ECDSA-NIST-P-256/SHA-256 with 32/32 split
 					r: 32 Bytes, unsigned integer, MSByte first
 					s: 32 Bytes, unsigned integer, MSByte first
 				
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
 	x Bytes signature
-		signature type 0: uses SHA-256 with ECDSA, curve NIST P-256
+		signature format 0
 			signature over
 				Byte 0: signature type
-				Bytes 1-8: length fields, all unsigned integers, LSByte first
-					1: 8 bit, card UID, if enabled
-					2: 8 bit, identification file (entire contents)
-					3-4: 16 bit, old signature
-					5: 8 bit, key identifier
+				Byte 1: signature format
+				Bytes 2-9: length fields, all unsigned integers, LSByte first
+					2: 8 bit, card UID, if enabled
+					3: 8 bit, identification file (entire contents)
+					4-5: 16 bit, old signature
+					6: 8 bit, key identifier
 				Remainder of data (all signed integers: LSByte first):
 					4 Byte new transaction counter 
 					4 Byte new lower limit
@@ -85,6 +90,8 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 					old signature of given length
 					key identifier of given length
 			signature expressed as
+				signature type: 1 byte
+					0 for ECDSA-NIST-P-256/SHA-256 with 32/32 split
 				r: 32 Bytes, unsigned integer, MSByte first
 				s: 32 Bytes, unsigned integer, MSByte first
 

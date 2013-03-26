@@ -2,19 +2,26 @@ DESfire EV1 application design for DOPE: DESfire Open Payment Environment
 
 AID FF77CF
 Authentication AES, 5 keys (Master, Identification, Debit, Limited Credit, Credit), all files are fully enciphered, keys may be changed after authentication with master key
+Two modes:
+	Mode A: File 0 is read with non-diversified Identification key, then instance identifier and optionally UID can be read and used for derivation of other keys
+		Card can use random UID, compatible with openkey (on 8k cards)
+	Mode D: File 0 is read with diversified (using UID) Debit key, Identification key is not used
+		Saves one authentication round-trip
 
-File 0: Identification.  Backup Data File 40 bytes, Read Identification, Write Master, Readwrite Master, Change accessrights: Never
+File 0: Identification.  Backup Data File 20 bytes, Read Identification/Debit, Write Master, Readwrite Master, Change accessrights: Never
 Byte 0: Application version.subversion (1 nibble each), starts at 0.0
 	FIXME: Define version semantics with regards to parsing, processing and writing
 Byte 1: Instance identifier length, currently 36 byte
-Byte 2-37: Instance identifier, string, UUID in dashed standard format, lowercase
-Byte 38-39: Application flags, 16-bit unsigned integer, LSByte first
+Byte 2-17: Instance identifier, binary UUID
+Byte 18-19: Application flags, 16-bit unsigned integer, LSByte first
 	0: Limited credit enabled (0= no, 1= yes)
-	1-4: Key derivation
-		1: Use instance identifier (0= no, 1= yes)
-		2: Use card UID (0=no, 1= yes)
-		3-4: Reserved, abort processing if set and unable to handle
-	5-8: Signature generation
+	1-5: Key derivation
+		1: Use instance identifier for Debit key (0= no, 1= yes)
+		2: Use instance identifier for Credit and Limited Credit key (0= no, 1= yes)
+		3: Use card UID (0=no, 1= yes)
+		4-5: Reserved, abort processing if set and unable to handle
+	6: Use UID in signature (0= no, 1=yes)
+	8-11: Signature generation
 		0000: Use format 0
 		Other values reserved, abort processing if set and unable to handle
 	Remainder of field reserved, _ignore_ if set and unable to handle. Incompatible additions will be announced through application version field
@@ -29,47 +36,57 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 	Must be updated for any change in Transaction counter
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of old signature 
 	x Bytes old signature
-	4 Bytes: 32-bit signed integer, LSByte first, old value
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of certificate
-		1 byte certificate type, fixed byte 0
+	x Bytes: certificate
+		1 Byte certificate type, currently 0, abort if unable to handle
 		4 Bytes: 32-bit unsigned integer, LSByte first, key identifier. 
-			Upper three bits:
-				29: Allow debit (0= no, 1= yes)
-				30: Allow limited credit (0= no, 1=yes)
-				31: Allow credit (0= no, 1=yes)
-			all bits 0: reserved invalid
-			all bits 1: reserved master
+			all bits 0: invalid
+			all bits 1: reserved
+		1 Byte: key flags
+			0: Debit (0= no, 1= yes)
+			1: Limited credit (0= no, 1= yes)
+			2: Credit (0= no, 1= yes)
+			Other values reserved, _ignore_ if set and unable to handle, incompatible additions will be announced through certificate type
 		2 Bytes: 16-bit unsigned integer, LSByte first, length of public key
 		x Bytes public key
+			1 Byte type and format, currently only 0
+			Format 0: uses ECDSA, curve NIST P-256
+				q: unsigned integer, MSByte first
 		2 Bytes: 16-bit unsigned integer, LSByte first, length of certification signature
 		x Bytes certification signature
-			certificate type 0: signature over
-				Byte 0: certificate type
-				Byte 1-4: key identifier, 32-bit unsigned integer, LSByte first
-				Byte 5-6: 16-bit unsigned integer, LSByte first, length of public key
-				Byte 7-x: public key
+			certificate type 0: uses SHA-256 with ECDSA, curve NIST P-256
+				signature over
+					Byte 0: certificate type
+					Byte 1-4: key identifier, 32-bit unsigned integer, LSByte first
+					Byte 5: key flags
+					Byte 6-7: 16-bit unsigned integer, LSByte first, length of public key
+					Byte 8-x: public key
+				signature expressed as
+					r: 32 Bytes, unsigned integer, MSByte first
+					s: 32 Bytes, unsigned integer, MSByte first
+				
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
 	x Bytes signature
-	
-		Signature format 0: signature over
-			Byte 0: signature format version, fixed byte 0
-			Bytes 1-8: length fields, all unsigned integers, LSByte first
-				1: 8 bit, instance identifier, if enabled
-				2: 8 bit, card UID, if enabled
-				3: 8 bit, identification file (entire contents)
-				4-5: 16 bit, old signature
-				6: 8 bit, key identifier
-			Remainder of file (all signed integers: LSByte first):
-				4 Byte old value
-				4 Byte new transaction counter 
-				4 Byte new lower limit
-				4 Byte new upper limit
-				4 Byte new value
-				instance identifier of given length
-				card UID of given length
-				identification file of given length
-				old signature of given length
-				key identifier of given length
+		signature type 0: uses SHA-256 with ECDSA, curve NIST P-256
+			signature over
+				Byte 0: signature type
+				Bytes 1-8: length fields, all unsigned integers, LSByte first
+					1: 8 bit, card UID, if enabled
+					2: 8 bit, identification file (entire contents)
+					3-4: 16 bit, old signature
+					5: 8 bit, key identifier
+				Remainder of data (all signed integers: LSByte first):
+					4 Byte new transaction counter 
+					4 Byte new lower limit
+					4 Byte new upper limit
+					4 Byte new value
+					card UID of given length
+					identification file of given length
+					old signature of given length
+					key identifier of given length
+			signature expressed as
+				r: 32 Bytes, unsigned integer, MSByte first
+				s: 32 Bytes, unsigned integer, MSByte first
 
 Key derivation type 0
 	HMAC-SHA256, truncated to 128 bits for AES-128

@@ -21,6 +21,7 @@ Byte 18-19: Application flags, 16-bit unsigned integer, LSByte first
 		3: Use card UID (0=no, 1= yes)
 		4-5: Reserved, abort processing if set and unable to handle
 	6: Use UID in signature (0= no, 1=yes)
+	7: Certificate on card (0=no, 1=yes), 0 is currently unspecified, abort processing if unable to handle
 	8-11: Signature generation
 		0000: Use format 0
 		Other values reserved, abort processing if set and unable to handle
@@ -37,6 +38,38 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of old hash 
 	x Bytes old hash
 		This is the hash the previous signature was made over
+	
+	4 Bytes: time, POSIX-timestamp (time() return value), 32-bit signed integer, LSByte first
+		FIXME: This should really be 64 bit. When the spec is complete, assess whether extending the field
+			will increase the number of necessary blocks.
+
+	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
+	x Bytes signature
+		signature format 0
+			signature over
+				Byte 0: signature type
+				Byte 1: signature format
+				Bytes 2-9: length fields, all unsigned integers, LSByte first
+					2: 8 bit, card UID, if enabled
+					3: 8 bit, identification file (entire contents)
+					4-5: 16 bit, old signature
+					6: 8 bit, key identifier
+				Remainder of data (all signed integers: LSByte first):
+					4 Byte new transaction counter 
+					4 Byte new lower limit
+					4 Byte new upper limit
+					4 Byte new value
+					4 Byte time
+					card UID of given length
+					identification file of given length
+					old signature of given length
+					key identifier of given length
+			signature expressed as
+				signature type: 1 byte
+					0 for ECDSA-NIST-P-256/SHA-256 with 32/32 split
+				r: 32 Bytes, unsigned integer, MSByte first
+				s: 32 Bytes, unsigned integer, MSByte first
+
 	2 Bytes: 16-bit unsigned integer, LSByte first, length of certificate
 	x Bytes: certificate
 		1 Byte certificate format, currently 0, abort if unable to handle
@@ -69,31 +102,6 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 					r: 32 Bytes, unsigned integer, MSByte first
 					s: 32 Bytes, unsigned integer, MSByte first
 				
-	2 Bytes: 16-bit unsigned integer, LSByte first, length of signature
-	x Bytes signature
-		signature format 0
-			signature over
-				Byte 0: signature type
-				Byte 1: signature format
-				Bytes 2-9: length fields, all unsigned integers, LSByte first
-					2: 8 bit, card UID, if enabled
-					3: 8 bit, identification file (entire contents)
-					4-5: 16 bit, old signature
-					6: 8 bit, key identifier
-				Remainder of data (all signed integers: LSByte first):
-					4 Byte new transaction counter 
-					4 Byte new lower limit
-					4 Byte new upper limit
-					4 Byte new value
-					card UID of given length
-					identification file of given length
-					old signature of given length
-					key identifier of given length
-			signature expressed as
-				signature type: 1 byte
-					0 for ECDSA-NIST-P-256/SHA-256 with 32/32 split
-				r: 32 Bytes, unsigned integer, MSByte first
-				s: 32 Bytes, unsigned integer, MSByte first
 
 Key derivation type 0
 	HMAC-SHA256, truncated to 128 bits for AES-128

@@ -16,6 +16,6 @@
 #include "dope.h"
 
 int main(void) {
-  print_hello();
-  return 0;
+	dope_create_master("Foo.conf");
+	return 0;
 }

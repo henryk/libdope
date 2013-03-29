@@ -52,7 +52,7 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 				Bytes 2-9: length fields, all unsigned integers, LSByte first
 					2: 8 bit, card UID, if enabled
 					3: 8 bit, identification file (entire contents)
-					4-5: 16 bit, old signature
+					4-5: 16 bit, old hash
 					6: 8 bit, key identifier
 				Remainder of data (all signed integers: LSByte first):
 					4 Byte new transaction counter 
@@ -62,7 +62,7 @@ File 3: Signature.  Backup Data file, Read: Debit, Write: Debit, Readwrite: Cred
 					4 Byte time
 					card UID of given length
 					identification file of given length
-					old signature of given length
+					old hash of given length
 					key identifier of given length
 			signature expressed as
 				signature type: 1 byte
@@ -160,3 +160,34 @@ Limited credit process:
 	In error case: Re-read application and compare transaction counter and cash value
 	
 FIXME: The (limited) credit processes seem funky, may need adjustment. 
+
+Log files
+Each line in the log is a series of fields, separated each by a single space
+	timestamp, format TBD FIXME
+	cause
+		"format", used when a new card was created
+		"read", used when a card was read, e.g. always preceding a value change
+		"debit", used when a card was written, containing the new values
+		"limited_credit", dito
+		"credit", dito
+	card UID, as read from anticollision, binary data
+	card UID, if relevant, possibly retrieved with GetUID command, binary data, optional
+	instance identifier, UUID
+	value change, integer, optional
+	transaction counter, integer
+	lower limit, integer
+	upper limit, integer
+	value, integer
+	timestamp of signature, integer
+	identification file, binary data
+	signature file, binary data
+	
+
+field formats are as follows:
+	binary data as hex-strings, case ignored, no spaces or other delimiters between bytes
+	integers as base 10 strings, optional "+" or "-" prefix
+	UUID in standard dashed format, lowercase
+	optional fields must be replaced with the 1-byte string "-" if they are not present
+	
+
+FIXME: What of error cases during the write process?

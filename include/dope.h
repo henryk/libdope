@@ -34,6 +34,7 @@ enum dope_role {
 	DOPE_ROLE_DEBIT = 1,
 	DOPE_ROLE_CREDIT = 2,
 	DOPE_ROLE_LIMITED_CREDIT = 3,
+	DOPE_ROLE_CERTIFIER = 4,
 };
 
 enum dope_transaction_type {
@@ -53,9 +54,9 @@ extern dope_context_t dope_init(const char *config, dope_log_cb_t log_callback, 
 extern int dope_fini(dope_context_t ctx);
 
 extern int dope_create_master(const char *config);
-extern int dope_create_debit(dope_context_t ctx, const char *config);
-extern int dope_create_credit(dope_context_t ctx, const char *config);
-extern int dope_create_limited_credit(dope_context_t ctx, const char *config);
+extern int dope_create_debit(dope_context_t ctx, const char *config, uint32_t id);
+extern int dope_create_credit(dope_context_t ctx, const char *config, uint32_t id);
+extern int dope_create_limited_credit(dope_context_t ctx, const char *config, uint32_t id);
 
 extern dope_connection_t dope_connect_any(dope_context_t ctx, nfc_context *nfc_context);
 extern dope_connection_t dope_connect(dope_context_t ctx, MifareTag tag);

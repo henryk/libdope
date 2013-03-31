@@ -1,10 +1,11 @@
 #include <gcrypt.h>
 #include <assert.h>
+#include <confuse.h>
 #include "dope.h"
 
 #define AES_KEY_LENGTH 16
-//#define LONG_TERM_KEY_STRENGTH GCRY_VERY_STRONG_RANDOM
-#define LONG_TERM_KEY_STRENGTH GCRY_STRONG_RANDOM
+#define LONG_TERM_KEY_STRENGTH GCRY_VERY_STRONG_RANDOM
+//#define LONG_TERM_KEY_STRENGTH GCRY_STRONG_RANDOM
 
 #define DOPE_CERTIFICATION_ECDSA_CURVE "NIST P-256"
 #define DOPE_ENTITY_ECDSA_CURVE "NIST P-256"
@@ -13,15 +14,14 @@
 
 #define GCRYPT_ERROR(r) fprintf(stderr, "ERROR: %s:%i: %s/%s\n", __FILE__, __LINE__, gcry_strsource(r), gcry_strerror(r))
 
-typedef struct dope_key_flags {
-	unsigned int debit:1;
-	unsigned int limited_credit:1;
-	unsigned int credit:1;
-} __attribute__((packed)) dope_key_flags;
-
 #define DOPE_CERTIFICATE_KEY_FLAG_DEBIT          (1<<0)
 #define DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT (1<<1)
 #define DOPE_CERTIFICATE_KEY_FLAG_CREDIT         (1<<2)
+#define DOPE_CERTIFICATE_VALID_KEY_FLAGS (DOPE_CERTIFICATE_KEY_FLAG_DEBIT | DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT | DOPE_CERTIFICATE_KEY_FLAG_CREDIT)
+
+#define DOPE_SECRET_KEY_VERSION_FIRST -1  /* Find first secret key of given type, ignore version */
+
+#define DOPE_DEFAULT_AID 0xFF77CF
 
 struct dope_secret_key {
 	enum dope_secret_key_type {
@@ -47,7 +47,32 @@ static const char* DOPE_SECRET_KEY_NAMES[] = {
 		[DOPE_SECRET_KEY_TYPE_CREDIT] = "credit",
 };
 
+static const struct {
+	enum dope_role role;
+	const char *name;
+	enum dope_secret_key_type keys[5];
+	bool need_certification_private;
+} DOPE_ROLE_KEY_REQUIREMENTS[] = {
+		{DOPE_ROLE_MASTER, "master", {DOPE_SECRET_KEY_TYPE_MASTER, DOPE_SECRET_KEY_TYPE_IDENTIFICATION, DOPE_SECRET_KEY_TYPE_DEBIT, DOPE_SECRET_KEY_TYPE_LIMITED_CREDIT, DOPE_SECRET_KEY_TYPE_CREDIT}, 0},
+		{DOPE_ROLE_CERTIFIER, "certifier", {DOPE_SECRET_KEY_TYPE_INVALID}, 1},
+		{DOPE_ROLE_DEBIT, "debit", {DOPE_SECRET_KEY_TYPE_IDENTIFICATION, DOPE_SECRET_KEY_TYPE_DEBIT}, 0},
+		{DOPE_ROLE_LIMITED_CREDIT, "limited_credit", {DOPE_SECRET_KEY_TYPE_IDENTIFICATION, DOPE_SECRET_KEY_TYPE_DEBIT, DOPE_SECRET_KEY_TYPE_LIMITED_CREDIT}, 0},
+		{DOPE_ROLE_CREDIT, "credit", {DOPE_SECRET_KEY_TYPE_IDENTIFICATION, DOPE_SECRET_KEY_TYPE_DEBIT, DOPE_SECRET_KEY_TYPE_CREDIT}, 0},
+};
+
+static const struct {
+	uint8_t flag;
+	const char *name;
+} DOPE_KEY_FLAG_NAMES[] = {
+		{DOPE_CERTIFICATE_KEY_FLAG_DEBIT, "debit"},
+		{DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT, "limited_credit"},
+		{DOPE_CERTIFICATE_KEY_FLAG_CREDIT, "credit"},
+};
+
 struct dope_context {
+	uint32_t aid;
+	bool use_uid;
+	bool force_uid;
 	uint8_t roles_initialized;
 
 	struct dope_secret_key *key_head;
@@ -57,7 +82,7 @@ struct dope_context {
 
 	struct dope_identity {
 		uint32_t key_identifier;
-		dope_key_flags key_flags;
+		uint8_t key_flags;
 		gcry_sexp_t public_key;
 		gcry_sexp_t private_key;
 		uint8_t *certificate;
@@ -65,10 +90,44 @@ struct dope_context {
 	} identity;
 
 	int open_connections;
+
+	dope_log_cb_t log_callback;
+	void *log_callback_p;
 };
 
 struct dope_connection {
 	struct dope_context *ctx;
+};
+
+static cfg_opt_t common_opts[] = {
+		CFG_INT("aid", DOPE_DEFAULT_AID, CFGF_NONE),
+		CFG_BOOL("use_uid", 1, CFGF_NONE),
+		CFG_BOOL("force_uid", 0, CFGF_NONE),
+		CFG_STR_LIST("roles", "", CFGF_NODEFAULT),
+		CFG_END(),
+};
+
+static cfg_opt_t key_opts[] = {
+		CFG_STR("key", "", CFGF_NODEFAULT),
+		CFG_STR("public_key", "", CFGF_NODEFAULT),
+		CFG_STR("private_key", "", CFGF_NODEFAULT),
+		CFG_END(),
+};
+
+static cfg_opt_t identity_opts[] = {
+		CFG_INT("identifier", -1, CFGF_NONE),
+		CFG_STR_LIST("flags", "", CFGF_NODEFAULT),
+		CFG_STR("public_key", NULL, CFGF_NONE),
+		CFG_STR("private_key", NULL, CFGF_NONE),
+		CFG_STR("certificate", NULL, CFGF_NONE),
+		CFG_END(),
+};
+
+static cfg_opt_t dope_opts[] = {
+		CFG_SEC("common", common_opts, CFGF_NODEFAULT),
+		CFG_SEC("key", key_opts, CFGF_MULTI | CFGF_TITLE | CFGF_NO_TITLE_DUPES),
+		CFG_SEC("identity", identity_opts, CFGF_NODEFAULT),
+		CFG_END(),
 };
 
 static bool _init_gcrypt(void)
@@ -109,42 +168,27 @@ static void _free_context(struct dope_context *ctx)
 	gcry_free(ctx);
 }
 
-static bool _write_key_flags(FILE *fh, dope_key_flags key_flags)
+static bool _write_key_flags(FILE *fh, uint8_t key_flags)
 {
 	if(fprintf(fh, "{") != 1) {
 		return 0;
 	}
 
 	int had_one = 0;
-	if(key_flags.debit) {
-		if(fprintf(fh, "debit") != 5) {
-			return 0;
-		}
-		had_one = 1;
-	}
+	for(size_t i = 0; i<sizeof(DOPE_KEY_FLAG_NAMES)/sizeof(DOPE_KEY_FLAG_NAMES[0]); i++) {
+		if(key_flags & DOPE_KEY_FLAG_NAMES[i].flag) {
+			if(had_one) {
+				if(fprintf(fh, ", ") != 2) {
+					return 0;
+				}
+			}
 
-	if(key_flags.limited_credit) {
-		if(had_one) {
-			if(fprintf(fh, ", ") != 2) {
+			if(fprintf(fh, "%s", DOPE_KEY_FLAG_NAMES[i].name) != strlen(DOPE_KEY_FLAG_NAMES[i].name)) {
 				return 0;
 			}
-		}
-		if(fprintf(fh, "limited_credit") != 14) {
-			return 0;
-		}
-		had_one = 1;
-	}
 
-	if(key_flags.credit) {
-		if(had_one) {
-			if(fprintf(fh, ", ") != 2) {
-				return 0;
-			}
+			had_one = 1;
 		}
-		if(fprintf(fh, "credit") != 6) {
-			return 0;
-		}
-		had_one = 1;
 	}
 
 	if(fprintf(fh, "}\n") != 2) {
@@ -234,7 +278,27 @@ static bool _write_key_section(FILE *fh, const struct dope_secret_key *key)
 	return 1;
 }
 
-static int _write_master(const struct dope_context *ctx, const char *config)
+static bool _write_roles(FILE *fh, uint8_t roles)
+{
+	int had_one = 0;
+	for(size_t i=0; i<sizeof(DOPE_ROLE_KEY_REQUIREMENTS)/sizeof(DOPE_ROLE_KEY_REQUIREMENTS[0]); i++) {
+		if(roles & (1<<DOPE_ROLE_KEY_REQUIREMENTS[i].role)) {
+			if(had_one) {
+				if(fprintf(fh, ", ") != 2) {
+					return 0;
+				}
+			}
+			if(fprintf(fh, "%s", DOPE_ROLE_KEY_REQUIREMENTS[i].name) != strlen(DOPE_ROLE_KEY_REQUIREMENTS[i].name)) {
+				return 0;
+			}
+
+			had_one = 1;
+		}
+	}
+	return 1;
+}
+
+static int _write_config(const struct dope_context *ctx, const char *config)
 {
 	int retval = -1;
 	FILE *fh = fopen(config, "w");
@@ -243,18 +307,24 @@ static int _write_master(const struct dope_context *ctx, const char *config)
 	}
 
 	fprintf(fh, "common {\n"); // FIXME Check return
-	fprintf(fh, "    aid = 0xFF77CF\n");
-	fprintf(fh, "    use_uid = yes\n");
-	fprintf(fh, "    force_uid = no\n");
-	fprintf(fh, "    roles = {master, debit, limited_credit, credit, certifier}\n");
+	fprintf(fh, "    aid = 0x%06X\n", ctx->aid);
+	fprintf(fh, "    use_uid = %s\n", ctx->use_uid ? "yes" : "no");
+	fprintf(fh, "    force_uid = %s\n", ctx->force_uid ? "yes" : "no");
+	fprintf(fh, "    roles = {");
+	if(!_write_roles(fh, ctx->roles_initialized)) {
+		goto abort;
+	}
+	fprintf(fh, "}\n");
 	fprintf(fh, "}\n\n");
 
 	fprintf(fh, "key certification {\n");
 	if(!_write_sexp_key(fh, "    public_key", ctx->certification_public_key)) {
 		goto abort;
 	}
-	if(!_write_sexp_key(fh, "    private_key", ctx->certification_private_key)) {
-		goto abort;
+	if(ctx->certification_private_key != NULL) {
+		if(!_write_sexp_key(fh, "    private_key", ctx->certification_private_key)) {
+			goto abort;
+		}
 	}
 	fprintf(fh, "}\n\n");
 
@@ -382,6 +452,83 @@ static bool _generate_secret_key(struct dope_context *ctx, enum dope_secret_key_
 	ctx->key_head = key;
 
 	return 1;
+}
+
+static int _verify(const uint8_t *data, size_t data_length, gcry_sexp_t key, const uint8_t *signature, size_t signature_length)
+{
+	gcry_md_hd_t hash_md = NULL;
+	const uint8_t *r_buffer, *s_buffer; // Note: These are *inside* signature, so don't need to be freed
+	size_t r_buffer_length = 0, s_buffer_length = 0;
+	gcry_sexp_t sig_data = NULL, sig_value = NULL;
+	int retval = -1;
+
+	if(data == NULL || signature == NULL || key == NULL) {
+		goto abort;
+	}
+
+	// Signature needs to be at least 3 bytes long: length_lo, length_hi, type
+	if(signature_length < 3) {
+		goto abort;
+	}
+
+	size_t inner_signature_length = signature[1];
+	inner_signature_length <<= 8;
+	inner_signature_length |= signature[0];
+
+	if(inner_signature_length + 2 != signature_length) {
+		goto abort;
+	}
+
+	int signature_type = signature[2];
+	if(signature_type != 0) {
+		// We can only handle type 0 signatures
+		goto abort;
+	}
+
+	// Type 0 means ECDSA-NIST-P-256/SHA-256 with 32/32 split
+	// FIXME Check that the public key is ECDSA-NIST-P-256
+
+	r_buffer_length = 32;
+	s_buffer_length = 32;
+
+	if(inner_signature_length != 1 + r_buffer_length + s_buffer_length) {
+		goto abort;
+	}
+
+	r_buffer = signature + 3;
+	s_buffer = signature + 3 + r_buffer_length;
+
+
+	if(gcry_md_open(&hash_md, DOPE_SIGNATURE_HASH_TYPE_0, 0)) {
+		goto abort;
+	}
+
+	gcry_md_putc(hash_md, signature_type);
+	gcry_md_write(hash_md, data, data_length);
+
+	int r = gcry_sexp_build(&sig_data, NULL, "(data (value %b ) )",
+			gcry_md_get_algo_dlen(DOPE_SIGNATURE_HASH_TYPE_0), gcry_md_read(hash_md, DOPE_SIGNATURE_HASH_TYPE_0) );
+	if(r) {
+		goto abort;
+	}
+
+	r = gcry_sexp_build(&sig_value, NULL, "(sig-val (ecdsa (r %b) (s %b) ) )", r_buffer_length, r_buffer, s_buffer_length, s_buffer);
+	if(r) {
+		goto abort;
+	}
+
+	r = gcry_pk_verify(sig_value, sig_data, key);
+	if(r) {
+		goto abort;
+	}
+
+	retval = 0;
+
+abort:
+	gcry_md_close(hash_md);
+	gcry_sexp_release(sig_data);
+	gcry_sexp_release(sig_value);
+	return retval;
 }
 
 static int _sign(const uint8_t *data, size_t data_length, int signature_type, gcry_sexp_t key, uint8_t **signature, size_t *signature_length)
@@ -512,6 +659,53 @@ abort:
 	return retval;
 }
 
+static int _canon_cert_data(const struct dope_identity *id, uint8_t **cert_data, size_t *cert_data_length)
+{
+	if(id == NULL || cert_data == NULL || cert_data_length == 0) {
+		return -1;
+	}
+
+	int retval = -1;
+	uint8_t *pubkey = NULL;
+	size_t pubkey_length = 0;
+
+	if(_serialize_pubkey(id->public_key, &pubkey, &pubkey_length) < 0) {
+		goto abort;
+	}
+
+	*cert_data_length = 6 + pubkey_length; // 6 bytes fixed data
+	*cert_data = malloc(*cert_data_length);
+	if(*cert_data == NULL) {
+		goto abort;
+	}
+
+	uint8_t flags = 0;
+	flags = id->key_flags & DOPE_CERTIFICATE_VALID_KEY_FLAGS;
+
+	(*cert_data)[0] = 0x00; // certificate format
+	(*cert_data)[1] = (id->key_identifier >>  0) & 0xff; // key identifier, LSByte first
+	(*cert_data)[2] = (id->key_identifier >>  8) & 0xff;
+	(*cert_data)[3] = (id->key_identifier >> 16) & 0xff;
+	(*cert_data)[4] = (id->key_identifier >> 24) & 0xff;
+	(*cert_data)[5] = flags; // key flags
+
+	memcpy((*cert_data) + 6, pubkey, pubkey_length);
+	retval = 0;
+
+abort:
+	if(retval < 0) {
+		if(*cert_data != NULL) {
+			free(*cert_data);
+		}
+		*cert_data = NULL;
+		*cert_data_length = 0;
+	}
+	if(pubkey != NULL) {
+		free(pubkey);
+	}
+	return retval;
+}
+
 static int _sign_identity(struct dope_context *ctx, struct dope_identity *id)
 {
 	if(ctx == NULL || id == NULL) {
@@ -525,38 +719,12 @@ static int _sign_identity(struct dope_context *ctx, struct dope_identity *id)
 	}
 
 	int retval = -1;
-	uint8_t *cert = NULL, *pubkey = NULL, *cert_data = NULL, *signature = NULL;
-	size_t cert_length = 0, pubkey_length = 0, cert_data_length = 0, signature_length = 0;
+	uint8_t *cert = NULL, *cert_data = NULL, *signature = NULL;
+	size_t cert_length = 0, cert_data_length = 0, signature_length = 0;
 
-	if(_serialize_pubkey(id->public_key, &pubkey, &pubkey_length) < 0) {
+	if(_canon_cert_data(id, &cert_data, &cert_data_length) < 0) {
 		goto abort;
 	}
-
-	cert_data_length = 6 + pubkey_length; // 6 bytes fixed data
-	cert_data = malloc(cert_data_length);
-	if(cert_data == NULL) {
-		goto abort;
-	}
-
-	uint8_t flags = 0;
-	if(id->key_flags.debit) {
-		flags |= DOPE_CERTIFICATE_KEY_FLAG_DEBIT;
-	}
-	if(id->key_flags.limited_credit) {
-		flags |= DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT;
-	}
-	if(id->key_flags.credit) {
-		flags |= DOPE_CERTIFICATE_KEY_FLAG_CREDIT;
-	}
-
-	cert_data[0] = 0x00; // certificate format
-	cert_data[1] = (id->key_identifier >>  0) & 0xff; // key identifier, LSByte first
-	cert_data[2] = (id->key_identifier >>  8) & 0xff;
-	cert_data[3] = (id->key_identifier >> 16) & 0xff;
-	cert_data[4] = (id->key_identifier >> 24) & 0xff;
-	cert_data[5] = flags; // key flags
-
-	memcpy(cert_data + 6, pubkey, pubkey_length);
 
 	if(_sign(cert_data, cert_data_length, 0, ctx->certification_private_key, &signature, &signature_length) < 0){
 		goto abort;
@@ -579,9 +747,6 @@ abort:
 	if(cert != NULL && retval < 0) {
 		free(cert);
 	}
-	if(pubkey != NULL) {
-		free(pubkey);
-	}
 	if(cert_data != NULL) {
 		free(cert_data);
 	}
@@ -589,6 +754,153 @@ abort:
 		free(signature);
 	}
 
+	return retval;
+}
+
+static int _verify_identity(struct dope_context *ctx, struct dope_identity *id)
+{
+	if(ctx == NULL || id == NULL || id->certificate == NULL) {
+		return -1;
+	}
+
+	int retval = -1;
+	uint8_t *cert_data = NULL;
+	size_t cert_data_length = 0;
+
+	if(_canon_cert_data(id, &cert_data, &cert_data_length) < 0) {
+		goto abort;
+	}
+
+	if(id->certificate_length < cert_data_length) {
+		goto abort;
+	}
+
+	if(memcmp(id->certificate, cert_data, cert_data_length) != 0) {
+		goto abort;
+	}
+
+	if(_verify(cert_data, cert_data_length,
+			ctx->certification_public_key,
+			id->certificate + cert_data_length, id->certificate_length - cert_data_length) < 0) {
+		goto abort;
+	}
+
+	retval = 0;
+
+abort:
+	if(cert_data != NULL) {
+		free(cert_data);
+	}
+	return retval;
+}
+
+static int _parse_hex(const char *in, uint8_t **out, size_t *out_length, int secure)
+{
+	if(in == NULL || out == NULL || out_length == NULL) {
+		return -1;
+	}
+
+	size_t inlen = strlen(in);
+	if(inlen % 2 != 0) {
+		return -1;
+	}
+
+	int retval = -1;
+	size_t buf_length = inlen/2;
+	uint8_t *buf = NULL;
+	if(secure) {
+		buf = gcry_calloc_secure(1, buf_length);
+	} else {
+		buf = calloc(1, buf_length);
+	}
+
+	if(buf == NULL) {
+		goto abort;
+	}
+
+	size_t pos = 0;
+	for(size_t i = 0; i<inlen; i++) {
+		uint8_t n;
+		if(in[i] >= '0' && in[i] <= '9') {
+			n = in[i] - '0';
+		} else if(in[i] >= 'a' && in[i] <= 'f') {
+			n = in[i] - 'a' + 10;
+		} else if(in[i] >= 'A' && in[i] <= 'F') {
+			n = in[i] - 'A' + 10;
+		} else {
+			goto abort;
+		}
+
+		if(i % 2 == 0) {
+			buf[pos] = n<<4;
+		} else {
+			buf[pos] |= n;
+			pos++;
+		}
+	}
+
+	*out = buf;
+	*out_length = buf_length;
+	retval = 0;
+
+abort:
+	if(retval < 0) {
+		if(buf != NULL) {
+			memset(buf, 0, buf_length);
+			if(secure) {
+				gcry_free(buf);
+			} else {
+				free(buf);
+			}
+		}
+	}
+	return retval;
+}
+
+static int _parse_secret_key(struct dope_context *ctx, enum dope_secret_key_type type, uint8_t version, const char *value)
+{
+	if(ctx == NULL || value == NULL) {
+		return -1;
+	}
+
+	uint8_t *buf = NULL;
+	size_t buf_length = 0;
+	struct dope_secret_key *key = NULL;
+
+	int retval = -1;
+
+	if(_parse_hex(value, &buf, &buf_length, 1) < 0) {
+		goto abort;
+	}
+
+	if(buf_length > sizeof(key->key)) {
+		goto abort;
+	}
+
+	key = gcry_calloc_secure(1, sizeof(*key));
+	if(key == NULL) {
+		goto abort;
+	}
+
+	key->length = buf_length;
+	memcpy(key->key, buf, buf_length);
+	key->type = type;
+	key->version = version;
+	key->next = ctx->key_head;
+	ctx->key_head = key;
+	retval = 0;
+
+abort:
+	if(buf != NULL) {
+		memset(buf, 0, buf_length);
+		gcry_free(buf);
+	}
+	if(retval < 0) {
+		if(key != NULL) {
+			memset(key, 0, sizeof(*key));
+			gcry_free(key);
+		}
+	}
 	return retval;
 }
 
@@ -619,7 +931,7 @@ int dope_create_master(const char *config)
 	}
 
 	ctx->identity.key_identifier = 1;
-	ctx->identity.key_flags = (dope_key_flags){.credit = 1, .limited_credit = 1, .debit = 1};
+	ctx->identity.key_flags = DOPE_CERTIFICATE_KEY_FLAG_DEBIT | DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT | DOPE_CERTIFICATE_KEY_FLAG_CREDIT;
 	if(_sign_identity(ctx, &ctx->identity) < 0) {
 		goto abort;
 	}
@@ -644,11 +956,410 @@ int dope_create_master(const char *config)
 		goto abort;
 	}
 
+	ctx->aid = DOPE_DEFAULT_AID;
+	ctx->use_uid = 1;
+	ctx->force_uid = 0;
+	ctx->roles_initialized = (1<<DOPE_ROLE_CERTIFIER) | (1<<DOPE_ROLE_CREDIT) | (1<<DOPE_ROLE_DEBIT) | (1<<DOPE_ROLE_LIMITED_CREDIT) | (1<<DOPE_ROLE_MASTER);
 
-	retval = _write_master(ctx, config);
+
+	retval = _write_config(ctx, config);
 
 abort:
 	_free_context(ctx);
 
 	return retval;
 }
+
+static struct dope_secret_key *_find_secret_key(struct dope_context *ctx, enum dope_secret_key_type key_type, int key_version)
+{
+	if(ctx == NULL) {
+		return NULL;
+	}
+
+	if(key_version == DOPE_SECRET_KEY_VERSION_FIRST) {
+		// OK
+	} else if(key_version >= 0 && key_version <= 255) {
+		// OK
+	} else {
+		// key_version out of bounds
+		return NULL;
+	}
+
+	struct dope_secret_key *k = ctx->key_head;
+	while(k != NULL) {
+		if(k->type == key_type) {
+			if(key_version == DOPE_SECRET_KEY_VERSION_FIRST) {
+				return k;
+			} else if(key_version == key_version) {
+				return k;
+			}
+		}
+		k = k->next;
+	}
+
+	return NULL;
+}
+
+static int _copy_secret_key(struct dope_context *target, struct dope_context *source, enum dope_secret_key_type key_type)
+{
+	if(target == NULL || source == NULL) {
+		return -1;
+	}
+
+	struct dope_secret_key *src = _find_secret_key(source, key_type, DOPE_SECRET_KEY_VERSION_FIRST);
+	if(src == NULL) {
+		return -1;
+	}
+
+	struct dope_secret_key *tgt = gcry_calloc_secure(1, sizeof(*tgt));
+	if(tgt == NULL) {
+		return -1;
+	}
+
+	memcpy(tgt, src, sizeof(*tgt));
+	tgt->next = target->key_head;
+	target->key_head = tgt;
+
+	return 0;
+}
+
+static struct dope_context *_copy_context_base(dope_context_t ctx, uint8_t roles)
+{
+	if(ctx == NULL) {
+		return NULL;
+	}
+
+	bool error = 1;
+	struct dope_context *n = NULL;
+
+	n = gcry_calloc_secure(1, sizeof(*n));
+	if(n == NULL) {
+		goto abort;
+	}
+
+	if(! _generate_ecdsa_key_pair(&n->identity.public_key, &n->identity.private_key, DOPE_ENTITY_ECDSA_CURVE) ) {
+		goto abort;
+	}
+
+	if(gcry_sexp_build(&n->certification_public_key, NULL, "%S", ctx->certification_public_key)) {
+		goto abort;
+	}
+
+	for(size_t i = 0; i<sizeof(DOPE_ROLE_KEY_REQUIREMENTS)/sizeof(DOPE_ROLE_KEY_REQUIREMENTS[0]); i++) {
+		if(roles & (1<<DOPE_ROLE_KEY_REQUIREMENTS[i].role)) {
+			for(size_t j = 0; j<sizeof(DOPE_ROLE_KEY_REQUIREMENTS[i].keys)/sizeof(DOPE_ROLE_KEY_REQUIREMENTS[i].keys[0]); j++) {
+				if(DOPE_ROLE_KEY_REQUIREMENTS[i].keys[j] == DOPE_SECRET_KEY_TYPE_INVALID) {
+					continue;
+				}
+				struct dope_secret_key *k = _find_secret_key(n, DOPE_ROLE_KEY_REQUIREMENTS[i].keys[j], DOPE_SECRET_KEY_VERSION_FIRST);
+				if(k == NULL) {
+					if(_copy_secret_key(n, ctx, DOPE_ROLE_KEY_REQUIREMENTS[i].keys[j]) < 0) {
+						goto abort;
+					}
+				}
+			}
+		}
+	}
+
+	n->aid = ctx->aid;
+	n->use_uid = ctx->use_uid;
+	n->force_uid = ctx->force_uid;
+	n->roles_initialized = roles;
+	error = 0;
+
+abort:
+	if(error) {
+		_free_context(n);
+		return NULL;
+	}
+
+	return n;
+
+}
+
+int dope_create_credit(dope_context_t ctx, const char *config, uint32_t id)
+{
+	if(ctx == NULL || config == NULL) {
+		return -1;
+	}
+
+	int retval = -1;
+	struct dope_context *n = _copy_context_base(ctx, 1<<DOPE_ROLE_CREDIT | 1<<DOPE_ROLE_LIMITED_CREDIT | 1<<DOPE_ROLE_DEBIT);
+
+	n->identity.key_identifier = id;
+	n->identity.key_flags = DOPE_CERTIFICATE_KEY_FLAG_DEBIT | DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT | DOPE_CERTIFICATE_KEY_FLAG_CREDIT;
+	if(_sign_identity(ctx, &n->identity) < 0) {
+		goto abort;
+	}
+
+	retval = _write_config(n, config);
+
+abort:
+	_free_context(n);
+
+	return retval;
+}
+
+int dope_create_limited_credit(dope_context_t ctx, const char *config, uint32_t id)
+{
+	if(ctx == NULL || config == NULL) {
+		return -1;
+	}
+
+	int retval = -1;
+	struct dope_context *n = _copy_context_base(ctx, 1<<DOPE_ROLE_LIMITED_CREDIT | 1<<DOPE_ROLE_DEBIT);
+
+	n->identity.key_identifier = id;
+	n->identity.key_flags = DOPE_CERTIFICATE_KEY_FLAG_DEBIT | DOPE_CERTIFICATE_KEY_FLAG_LIMITED_CREDIT;
+	if(_sign_identity(ctx, &n->identity) < 0) {
+		goto abort;
+	}
+
+	retval = _write_config(n, config);
+
+abort:
+	_free_context(n);
+
+	return retval;
+}
+
+int dope_create_debit(dope_context_t ctx, const char *config, uint32_t id)
+{
+	if(ctx == NULL || config == NULL) {
+		return -1;
+	}
+
+	int retval = -1;
+	struct dope_context *n = _copy_context_base(ctx, 1<<DOPE_ROLE_DEBIT);
+
+	n->identity.key_identifier = id;
+	n->identity.key_flags = DOPE_CERTIFICATE_KEY_FLAG_DEBIT;
+	if(_sign_identity(ctx, &n->identity) < 0) {
+		goto abort;
+	}
+
+	retval = _write_config(n, config);
+
+abort:
+	_free_context(n);
+
+	return retval;
+}
+
+static int _parse_config(dope_context_t ctx, const char *config)
+{
+	int retval = -1;
+	cfg_t *cfg = NULL;
+
+	cfg = cfg_init(dope_opts, CFGF_NONE);
+	if(cfg == NULL) {
+		goto abort;
+	}
+
+	// FIXME Set validators: pub/priv only in certificate, format of pub/priv, title of key section, roles, flags, aid
+
+	if(cfg_parse(cfg, config) != CFG_SUCCESS) {
+		goto abort;
+	}
+
+	// First: Load identity
+	cfg_t *cfg_identity = cfg_getsec(cfg, "identity");
+	if(cfg_identity == NULL) {
+		cfg_error(cfg, "section 'identity' must be present");
+		goto abort;
+	}
+
+	if(cfg_getint(cfg_identity, "identifier") < 0 || cfg_getint(cfg_identity, "identifier") > 0xFFFFFFFFUL) {
+		cfg_error(cfg_identity, "valid value for 'identifier' in section 'identity' must be present");
+		goto abort;
+	}
+	ctx->identity.key_identifier = cfg_getint(cfg_identity, "identifier");
+
+	const char *pubkey = cfg_getstr(cfg_identity, "public_key");
+	if(pubkey == NULL || gcry_sexp_new(&ctx->identity.public_key, pubkey, strlen(pubkey), 1) < 0) {
+		cfg_error(cfg_identity, "valid value for 'public_key' in section 'identity' must be present");
+		goto abort;
+	}
+
+	const char *privkey = cfg_getstr(cfg_identity, "private_key");
+	if(privkey == NULL || gcry_sexp_new(&ctx->identity.private_key, privkey, strlen(privkey), 1) < 0) {
+		cfg_error(cfg_identity, "valid value for 'private_key' in section 'identity' must be present");
+		goto abort;
+	}
+
+	const char *cert = cfg_getstr(cfg_identity, "certificate");
+	if(cert == NULL || _parse_hex(cert, &ctx->identity.certificate, &ctx->identity.certificate_length, 0) < 0) {
+		cfg_error(cfg_identity, "valid value for 'certificate' in section 'identity' must be present");
+		goto abort;
+	}
+
+	for(size_t i = 0; i<cfg_size(cfg_identity, "flags"); i++) {
+		const char *flag = cfg_getnstr(cfg_identity, "flags", i);
+		for(size_t j = 0; j<sizeof(DOPE_KEY_FLAG_NAMES)/sizeof(DOPE_KEY_FLAG_NAMES[i]); j++) {
+			if(strlen(flag) == strlen(DOPE_KEY_FLAG_NAMES[j].name) && strcmp(flag, DOPE_KEY_FLAG_NAMES[j].name) == 0) {
+				ctx->identity.key_flags |= DOPE_KEY_FLAG_NAMES[j].flag;
+			}
+		}
+	}
+
+	// Second: Assign all the keys
+	for(size_t i=0; i<cfg_size(cfg, "key"); i++) {
+		cfg_t *cfg_key = cfg_getnsec(cfg, "key", i);
+		const char *title = cfg_title(cfg_key);
+
+		if(title == NULL) {
+			cfg_error(cfg_key, "section 'key' must specify a key name");
+			goto abort;
+		}
+
+		if(strcmp(title, "certification") == 0) {
+			const char *pubkey = cfg_getstr(cfg_key, "public_key");
+			if(pubkey == NULL || gcry_sexp_new(&ctx->certification_public_key, pubkey, strlen(pubkey), 1) < 0) {
+				cfg_error(cfg_key, "valid value for 'public_key' in section 'key certification' must be present");
+				goto abort;
+			}
+
+			const char *privkey = cfg_getstr(cfg_key, "private_key");
+			if(privkey != NULL) {
+				if(gcry_sexp_new(&ctx->certification_private_key, privkey, strlen(privkey), 1) < 0) {
+					cfg_error(cfg_key, "value for 'private_key' in section 'key certification' must not be invalid");
+					goto abort;
+				}
+			}
+		} else {
+			const char *underscore_pos = strrchr(title, '_');
+			char *endptr = NULL;
+			long version = 0;
+
+			if(underscore_pos != NULL && underscore_pos[1] != 0) {
+				version = strtol(underscore_pos+1, &endptr, 10);
+			}
+
+			if(underscore_pos == NULL || underscore_pos[1] == 0 || endptr[0] != 0) {
+				cfg_error(cfg_key, "the name of a 'key' section must either be 'certification' or of the form type_version, not '%s'", title);
+				goto abort;
+			}
+
+			if(version < 0 || version > 255) {
+				cfg_error(cfg_key, "the key version in section 'key %s' exceeds the allowable values", title);
+				goto abort;
+			}
+
+			size_t type_length = underscore_pos - title;
+			bool added = 0;
+			for(size_t j=0; j<sizeof(DOPE_SECRET_KEY_NAMES)/sizeof(DOPE_SECRET_KEY_NAMES[0]); j++) {
+				if(DOPE_SECRET_KEY_NAMES[j] == NULL) {
+					continue;
+				}
+
+				if(strlen(DOPE_SECRET_KEY_NAMES[j]) == type_length && strncmp(title, DOPE_SECRET_KEY_NAMES[j], type_length) == 0) {
+					if(_parse_secret_key(ctx, j, version, cfg_getstr(cfg_key, "key")) < 0) {
+						cfg_error(cfg_key, "valid value for 'key' in section 'key %s' must be present", title);
+						goto abort;
+					} else {
+						added = 1;
+						break;
+					}
+				}
+			}
+
+			if(!added) {
+				cfg_error(cfg_key, "the name of a 'key' section must either be 'certification' or of the form type_version, not '%s'", title);
+				goto abort;
+			}
+		}
+	}
+
+	// Third: Verify certificate
+	if(_verify_identity(ctx, &ctx->identity) < 0) {
+		cfg_error(cfg, "the identity certificate or certification public key are invalid and/or can not be used");
+		goto abort;
+	}
+
+	// Fourth: Load common settings, and verify keys for all roles exist
+	cfg_t *cfg_common = cfg_getsec(cfg, "common");
+	if(cfg_common == NULL) {
+		cfg_error(cfg, "section 'common' must be present");
+		goto abort;
+	}
+
+	ctx->aid = cfg_getint(cfg_common, "aid");
+	ctx->force_uid = cfg_getbool(cfg_common, "force_uid");
+	ctx->use_uid = cfg_getbool(cfg_common, "use_uid");
+
+	for(size_t i=0; i<cfg_size(cfg_common, "roles"); i++) {
+		const char *role = cfg_getnstr(cfg_common, "roles", i);
+		int role_index = -1;
+		for(size_t j=0; j<sizeof(DOPE_ROLE_KEY_REQUIREMENTS)/sizeof(DOPE_ROLE_KEY_REQUIREMENTS[0]); j++) {
+			if(strlen(role) == strlen(DOPE_ROLE_KEY_REQUIREMENTS[j].name) && strcmp(role, DOPE_ROLE_KEY_REQUIREMENTS[j].name) == 0) {
+				role_index = j;
+				break;
+			}
+		}
+		if(role_index == -1) {
+			cfg_error(cfg_common, "invalid value '%s' for 'roles' in section 'common'", role);
+			goto abort;
+		}
+
+		if(DOPE_ROLE_KEY_REQUIREMENTS[role_index].need_certification_private) {
+			if(ctx->certification_private_key == NULL || gcry_pk_testkey(ctx->certification_private_key) != 0) {
+				cfg_error(cfg_common, "role '%s' needs a valid certification private key", role);
+				goto abort;
+			}
+		}
+
+		for(size_t j=0; j<sizeof(DOPE_ROLE_KEY_REQUIREMENTS[0].keys)/sizeof(DOPE_ROLE_KEY_REQUIREMENTS[0].keys[0]); j++) {
+			if(DOPE_ROLE_KEY_REQUIREMENTS[role_index].keys[j] == DOPE_SECRET_KEY_TYPE_INVALID) {
+				continue;
+			}
+			struct dope_secret_key *k = _find_secret_key(ctx, DOPE_ROLE_KEY_REQUIREMENTS[role_index].keys[j], DOPE_SECRET_KEY_VERSION_FIRST);
+			if(k == NULL) {
+				cfg_error(cfg_common, "role '%s' needs a secret key of type %s", role, DOPE_SECRET_KEY_NAMES[DOPE_ROLE_KEY_REQUIREMENTS[role_index].keys[j]]);
+				goto abort;
+			}
+		}
+
+		ctx->roles_initialized |= 1<<DOPE_ROLE_KEY_REQUIREMENTS[role_index].role;
+	}
+
+	retval = 0;
+
+abort:
+	if(cfg != NULL) {
+		cfg_free(cfg);
+	}
+	return retval;
+}
+
+extern dope_context_t dope_init(const char *config, dope_log_cb_t log_callback, void *p)
+{
+	if(!_init_gcrypt()) {
+		return NULL;
+	}
+
+	struct dope_context *result = gcry_calloc_secure(1, sizeof(*result));
+	if(result == NULL) {
+		return NULL;
+	}
+
+	if(_parse_config(result, config) < 0) {
+		_free_context(result);
+		return NULL;
+	}
+
+	result->log_callback = log_callback;
+	result->log_callback_p = p;
+
+	return result;
+}
+
+int dope_fini(dope_context_t ctx)
+{
+	if(ctx == NULL) {
+		return -1;
+	}
+
+	_free_context(ctx);
+	return 0;
+}
+

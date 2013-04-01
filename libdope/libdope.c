@@ -95,8 +95,39 @@ struct dope_context {
 	void *log_callback_p;
 };
 
+#define DOPE_APPLICATION_FLAG_LIMITED_CREDIT_ENABLED (1<<0)
+#define DOPE_APPLICATION_FLAG_KEY_DERIVATION_INSTANCE_FOR_DEBIT (1<<1)
+#define DOPE_APPLICATION_FLAG_KEY_DERIVATION_INSTANCE_FOR_CREDIT (1<<2)
+#define DOPE_APPLICATION_FLAG_KEY_DERIVATION_UID (1<<3)
+#define DOPE_APPLICATION_FLAG_KEY_DERIVATION_RESERVED_MASK (3<<4)
+#define DOPE_APPLICATION_FLAG_SIGNATURE_UID (1<<6)
+#define DOPE_APPLICATION_FLAG_CERTIFCATE_ON_CARD (1<<7)
+#define DOPE_APPLICATION_FLAG_SIGNATURE_FORMAT_MASK (0xf<<8)
+#define DOPE_APPLICATION_FLAG_SIGNATURE_FORMAT_0 (0<<8)
+
+#define INSTANCE_IDENTIFIER_MAX_LENGTH 16
+#define SIGNATURE_FILE_MAX_LENGTH 256 /* Is really 252, but I'm a little fuzzy on the length of the public key */
+#define IDENTIFICATION_FILE_MAX_LENGTH 20
+
 struct dope_connection {
 	struct dope_context *ctx;
+	struct dope_application {
+		uint8_t version;
+		uint8_t instance_identifier[INSTANCE_IDENTIFIER_MAX_LENGTH];
+		size_t instance_identifier_length;
+		uint16_t flags;
+
+		int32_t transaction_counter;
+
+		int32_t cash_value;
+		int32_t cash_value_max;
+
+		size_t identification_file_length;
+		uint8_t identification_file[IDENTIFICATION_FILE_MAX_LENGTH];
+
+		size_t signature_file_length;
+		uint8_t signature_file[SIGNATURE_FILE_MAX_LENGTH];
+	} app;
 };
 
 static cfg_opt_t common_opts[] = {

@@ -9,6 +9,7 @@
 
 #define DOPE_CERTIFICATION_ECDSA_CURVE "NIST P-256"
 #define DOPE_ENTITY_ECDSA_CURVE "NIST P-256"
+#define DOPE_KDF_HMAC_ALGORITHM GCRY_MD_SHA256
 
 #define DOPE_SIGNATURE_HASH_TYPE_0 GCRY_MD_SHA256
 
@@ -112,6 +113,8 @@ struct dope_context {
 struct dope_connection {
 	struct dope_context *ctx;
 	struct dope_application {
+		uint32_t aid;
+
 		uint8_t version;
 		uint8_t instance_identifier[INSTANCE_IDENTIFIER_MAX_LENGTH];
 		size_t instance_identifier_length;
@@ -1394,3 +1397,76 @@ int dope_fini(dope_context_t ctx)
 	return 0;
 }
 
+int dope_kdf(const uint8_t *master_key, size_t master_key_length, const struct dope_kdf_data *kdf_data, uint8_t *derived_key, size_t derived_key_length)
+{
+	if(master_key == NULL || kdf_data == NULL || derived_key == NULL) {
+		return -1;
+	}
+
+	if(kdf_data->derivation_type != 0) {
+		// Only support derivation type 0 so far.
+		return -1;
+	}
+
+	if(derived_key_length > gcry_md_get_algo_dlen(DOPE_KDF_HMAC_ALGORITHM)) {
+		return -1;
+	}
+
+	if(kdf_data->card_uid_length > 255 || kdf_data->instance_identifier_length > 255) {
+		return -1;
+	}
+
+	if(kdf_data->instance_identifier_length > 0 && kdf_data->instance_identifier == NULL) {
+		return -1;
+	}
+
+	if(kdf_data->card_uid_length > 0 && kdf_data->card_uid == NULL) {
+		return -1;
+	}
+
+	int retval = -1;
+	gcry_md_hd_t md = NULL;
+
+	int r = gcry_md_open(&md, DOPE_KDF_HMAC_ALGORITHM, GCRY_MD_FLAG_SECURE|GCRY_MD_FLAG_HMAC);
+	if(r != 0) {
+		goto abort;
+	}
+
+	r = gcry_md_setkey(md, master_key, master_key_length);
+	if(r != 0) {
+		goto abort;
+	}
+
+	gcry_md_putc(md, 0); // Derivation type
+
+	// Lengths
+	gcry_md_putc(md, kdf_data->instance_identifier_length);
+	gcry_md_putc(md, kdf_data->card_uid_length);
+	gcry_md_putc(md, 0); // Reserved, must be 0 if not used
+	gcry_md_putc(md, 0); // Reserved, must be 0 if not used
+
+	gcry_md_putc(md, (kdf_data->aid >>  0) & 0xff); // AID, LSByte first
+	gcry_md_putc(md, (kdf_data->aid >>  8) & 0xff);
+	gcry_md_putc(md, (kdf_data->aid >> 16) & 0xff);
+	gcry_md_putc(md, kdf_data->key_number);         // key number
+
+	// Data fields
+	if(kdf_data->instance_identifier_length > 0) {
+		gcry_md_write(md, kdf_data->instance_identifier, kdf_data->instance_identifier_length);
+	}
+
+	if(kdf_data->card_uid_length > 0) {
+		gcry_md_write(md, kdf_data->card_uid, kdf_data->card_uid_length);
+	}
+
+	memcpy(derived_key, gcry_md_read(md, DOPE_KDF_HMAC_ALGORITHM), derived_key_length);
+
+	retval = 0;
+
+abort:
+	if(md != NULL) {
+		gcry_md_close(md);
+	}
+
+	return retval;
+}

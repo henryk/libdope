@@ -69,5 +69,16 @@ extern int dope_transaction_prepare(dope_connection_t con, enum dope_transaction
 extern int dope_transaction_commit(dope_connection_t con);
 extern int dope_transaction_abort(dope_connection_t con);
 
+struct dope_kdf_data {
+	uint8_t derivation_type;
+	size_t instance_identifier_length;
+	const uint8_t *instance_identifier;
+	size_t card_uid_length;
+	const uint8_t *card_uid;
+	uint32_t aid;
+	uint8_t key_number;
+};
+
+extern int dope_kdf(const uint8_t *master_key, size_t master_key_length, const struct dope_kdf_data *kdf_data, uint8_t *derived_key, size_t derived_key_length);
 
 #endif
